@@ -10,8 +10,8 @@
 #ifndef liblldb_ProcessPOSIXLog_h_
 #define liblldb_ProcessPOSIXLog_h_
 
-
 #include "lldb/Utility/Log.h"
+#include "llvm/ADT/BitmaskEnum.h"
 
 namespace lldb_private {
 
@@ -25,20 +25,11 @@ enum class POSIXLog : Log::MaskType {
   Watchpoints = Log::ChannelFlag<6>,
   LLVM_MARK_AS_BITMASK_ENUM(Watchpoints)
 };
-
-#define POSIX_LOG_PROCESS ::lldb_private::POSIXLog::Process
-#define POSIX_LOG_THREAD ::lldb_private::POSIXLog::Thread
-#define POSIX_LOG_MEMORY ::lldb_private::POSIXLog::Memory
-#define POSIX_LOG_PTRACE ::lldb_private::POSIXLog::Ptrace
-#define POSIX_LOG_REGISTERS ::lldb_private::POSIXLog::Registers
-#define POSIX_LOG_BREAKPOINTS ::lldb_private::POSIXLog::Breakpoints
-#define POSIX_LOG_WATCHPOINTS ::lldb_private::POSIXLog::Watchpoints
+LLVM_ENABLE_BITMASK_ENUMS_IN_NAMESPACE();
 
 class ProcessPOSIXLog {
 public:
   static void Initialize();
-
-  static Log *GetLogIfAllCategoriesSet(POSIXLog mask) { return GetLog(mask); }
 };
 
 template <> Log::Channel &LogChannelFor<POSIXLog>();

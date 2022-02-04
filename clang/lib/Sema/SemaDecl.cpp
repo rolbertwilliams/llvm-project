@@ -1635,6 +1635,19 @@ bool Sema::CheckRedeclarationModuleOwnership(NamedDecl *New, NamedDecl *Old) {
 // A redeclaration of an entity X is implicitly exported if X was introduced by
 // an exported declaration; otherwise it shall not be exported.
 bool Sema::CheckRedeclarationExported(NamedDecl *New, NamedDecl *Old) {
+  // [module.interface]p1:
+  // An export-declaration shall inhabit a namespace scope.
+  //
+  // So it is meaningless to talk about redeclaration which is not at namespace
+  // scope.
+  if (!New->getLexicalDeclContext()
+           ->getNonTransparentContext()
+           ->isFileContext() ||
+      !Old->getLexicalDeclContext()
+           ->getNonTransparentContext()
+           ->isFileContext())
+    return false;
+
   bool IsNewExported = New->isInExportDeclContext();
   bool IsOldExported = Old->isInExportDeclContext();
 
@@ -5690,6 +5703,13 @@ static bool RebuildDeclaratorInCurrentInstantiation(Sema &S, Declarator &D,
   return false;
 }
 
+/// Returns true if the declaration is declared in a system header or from a
+/// system macro.
+static bool isFromSystemHeader(SourceManager &SM, const Decl *D) {
+  return SM.isInSystemHeader(D->getLocation()) ||
+         SM.isInSystemMacro(D->getLocation());
+}
+
 void Sema::warnOnReservedIdentifier(const NamedDecl *D) {
   // Avoid warning twice on the same identifier, and don't warn on redeclaration
   // of system decl.
@@ -5697,9 +5717,10 @@ void Sema::warnOnReservedIdentifier(const NamedDecl *D) {
     return;
   ReservedIdentifierStatus Status = D->isReserved(getLangOpts());
   if (Status != ReservedIdentifierStatus::NotReserved &&
-      !Context.getSourceManager().isInSystemHeader(D->getLocation()))
+      !isFromSystemHeader(Context.getSourceManager(), D)) {
     Diag(D->getLocation(), diag::warn_reserved_extern_symbol)
         << D << static_cast<int>(Status);
+  }
 }
 
 Decl *Sema::ActOnDeclarator(Scope *S, Declarator &D) {
@@ -9169,6 +9190,13 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
       if (isVirtual && Parent->isUnion()) {
         Diag(D.getDeclSpec().getVirtualSpecLoc(), diag::err_virtual_in_union);
         NewFD->setInvalidDecl();
+      }
+      if ((Parent->isClass() || Parent->isStruct()) &&
+          Parent->hasAttr<SYCLSpecialClassAttr>() &&
+          NewFD->getKind() == Decl::Kind::CXXMethod && NewFD->getIdentifier() &&
+          NewFD->getName() == "__init" && D.isFunctionDefinition()) {
+        if (auto *Def = Parent->getDefinition())
+          Def->setInitMethod(true);
       }
     }
 
@@ -14168,6 +14196,9 @@ ShouldWarnAboutMissingPrototype(const FunctionDecl *FD,
   if (!FD->isGlobal())
     return false;
 
+  if (!FD->isExternallyVisible())
+    return false;
+
   // Don't warn about C++ member functions.
   if (isa<CXXMethodDecl>(FD))
     return false;
@@ -14674,8 +14705,10 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
         Diag(FD->getLocation(), diag::ext_pure_function_definition);
 
       if (!FD->isInvalidDecl()) {
-        // Don't diagnose unused parameters of defaulted or deleted functions.
-        if (!FD->isDeleted() && !FD->isDefaulted() && !FD->hasSkippedBody())
+        // Don't diagnose unused parameters of defaulted, deleted or naked
+        // functions.
+        if (!FD->isDeleted() && !FD->isDefaulted() && !FD->hasSkippedBody() &&
+            !FD->hasAttr<NakedAttr>())
           DiagnoseUnusedParameters(FD->parameters());
         DiagnoseSizeOfParametersAndReturnValue(FD->parameters(),
                                                FD->getReturnType(), FD);
@@ -16729,8 +16762,21 @@ void Sema::ActOnTagFinishDefinition(Scope *S, Decl *TagD,
       RD->completeDefinition();
   }
 
-  if (isa<CXXRecordDecl>(Tag)) {
+  if (auto *RD = dyn_cast<CXXRecordDecl>(Tag)) {
     FieldCollector->FinishClass();
+    if (RD->hasAttr<SYCLSpecialClassAttr>()) {
+      auto *Def = RD->getDefinition();
+      assert(Def && "The record is expected to have a completed definition");
+      unsigned NumInitMethods = 0;
+      for (auto *Method : Def->methods()) {
+        if (!Method->getIdentifier())
+            continue;
+        if (Method->getName() == "__init")
+          NumInitMethods++;
+      }
+      if (NumInitMethods > 1 || !Def->hasInitMethod())
+        Diag(RD->getLocation(), diag::err_sycl_special_type_num_init_method);
+    }
   }
 
   // Exit this scope of this tag's definition.

@@ -11,9 +11,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "VECustomDAG.h"
 #include "VEISelLowering.h"
 #include "MCTargetDesc/VEMCExpr.h"
+#include "VECustomDAG.h"
 #include "VEInstrBuilder.h"
 #include "VEMachineFunctionInfo.h"
 #include "VERegisterInfo.h"
@@ -899,6 +899,10 @@ const char *VETargetLowering::getTargetNodeName(unsigned Opcode) const {
     TARGET_NODE_CASE(RET_FLAG)
     TARGET_NODE_CASE(TS1AM)
     TARGET_NODE_CASE(VEC_BROADCAST)
+    TARGET_NODE_CASE(REPL_I32)
+    TARGET_NODE_CASE(REPL_F32)
+
+    TARGET_NODE_CASE(LEGALAVL)
 
     // Register the VVP_* SDNodes.
 #define ADD_VVP_OP(VVP_NAME, ...) TARGET_NODE_CASE(VVP_NAME)
@@ -1642,8 +1646,7 @@ static SDValue getSplatValue(SDNode *N) {
 SDValue VETargetLowering::lowerBUILD_VECTOR(SDValue Op,
                                             SelectionDAG &DAG) const {
   VECustomDAG CDAG(DAG, Op);
-  unsigned NumEls = Op.getValueType().getVectorNumElements();
-  MVT ElemVT = Op.getSimpleValueType().getVectorElementType();
+  MVT ResultVT = Op.getSimpleValueType();
 
   // If there is just one element, expand to INSERT_VECTOR_ELT.
   unsigned UniqueIdx;
@@ -1651,24 +1654,30 @@ SDValue VETargetLowering::lowerBUILD_VECTOR(SDValue Op,
     SDValue AccuV = CDAG.getUNDEF(Op.getValueType());
     auto ElemV = Op->getOperand(UniqueIdx);
     SDValue IdxV = CDAG.getConstant(UniqueIdx, MVT::i64);
-    return CDAG.getNode(ISD::INSERT_VECTOR_ELT, Op.getValueType(),
-                        {AccuV, ElemV, IdxV});
+    return CDAG.getNode(ISD::INSERT_VECTOR_ELT, ResultVT, {AccuV, ElemV, IdxV});
   }
 
   // Else emit a broadcast.
   if (SDValue ScalarV = getSplatValue(Op.getNode())) {
-    // lower to VEC_BROADCAST
-    MVT LegalResVT = MVT::getVectorVT(ElemVT, 256);
-
+    unsigned NumEls = ResultVT.getVectorNumElements();
     auto AVL = CDAG.getConstant(NumEls, MVT::i32);
-    return CDAG.getBroadcast(LegalResVT, Op.getOperand(0), AVL);
+    return CDAG.getBroadcast(ResultVT, Op.getOperand(0), AVL);
   }
 
   // Expand
   return SDValue();
 }
 
+TargetLowering::LegalizeAction
+VETargetLowering::getCustomOperationAction(SDNode &Op) const {
+  // Custom lower to legalize AVL for packed mode.
+  if (isVVPOrVEC(Op.getOpcode()))
+    return Custom;
+  return Legal;
+}
+
 SDValue VETargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
+  LLVM_DEBUG(dbgs() << "::LowerOperation"; Op->print(dbgs()););
   unsigned Opcode = Op.getOpcode();
   if (ISD::isVPOpcode(Opcode))
     return lowerToVVP(Op, DAG);
@@ -1720,6 +1729,16 @@ SDValue VETargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
   case ISD::EXTRACT_VECTOR_ELT:
     return lowerEXTRACT_VECTOR_ELT(Op, DAG);
 
+  // Legalize the AVL of this internal node.
+  case VEISD::VEC_BROADCAST:
+#define ADD_VVP_OP(VVP_NAME, ...) case VEISD::VVP_NAME:
+#include "VVPNodes.def"
+    // AVL already legalized.
+    if (getAnnotatedNodeAVL(Op).second)
+      return Op;
+    return legalizeInternalVectorOp(Op, DAG);
+
+    // Translate into a VEC_*/VVP_* layer operation.
 #define ADD_VVP_OP(VVP_NAME, ISD_NAME) case ISD::ISD_NAME:
 #include "VVPNodes.def"
     return lowerToVVP(Op, DAG);
